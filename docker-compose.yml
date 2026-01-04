@@ -1,0 +1,9 @@
+services:
+  slack-bot:
+    build: .
+    container_name: slack-bot
+    restart: unless-stopped
+    env_file:
+      - .env
+    # 如果需要看 log
+    # docker logs -f slack-bot
