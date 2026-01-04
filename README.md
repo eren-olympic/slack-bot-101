@@ -123,6 +123,28 @@ python app.py
 
 ---
 
+## Docker 執行
+
+```bash
+# 複製環境變數
+cp .env.example .env
+# 編輯 .env 填入 Token
+
+# 啟動
+docker compose up -d
+
+# 看 log
+docker logs -f slack-bot
+
+# 停止
+docker compose down
+
+# 重新 build（更新代碼後）
+docker compose up -d --build
+```
+
+---
+
 ## 測試 Checklist
 
 ```
@@ -198,3 +220,4 @@ slack-bot-101/
 - `/ask` 改為公開顯示問題和回答
 - 所有回覆加上 `responding...` 狀態提示
 - 支援 Slack Assistant 模式（每個 thread 獨立追蹤對話上下文）
+- 新增 Docker 支援（Dockerfile + docker-compose.yml）
