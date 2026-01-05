@@ -163,11 +163,20 @@ def handle_ask_command(ack, command, client, respond):
                 text="_responding..._",
             )
 
-            answer, _ = dify.chat_complete(
-                query=query,
-                user=user_id,
-                stream=True,
-            )
+            # 發送到 Dify，失敗則重試一次
+            try:
+                answer, _ = dify.chat_complete(
+                    query=query,
+                    user=user_id,
+                    stream=True,
+                )
+            except Exception as dify_error:
+                print(f"   ⚠️ Dify error, retrying: {dify_error}")
+                answer, _ = dify.chat_complete(
+                    query=query,
+                    user=user_id,
+                    stream=True,
+                )
 
             client.chat_update(
                 channel=channel_id,
@@ -178,11 +187,19 @@ def handle_ask_command(ack, command, client, respond):
         except Exception as channel_error:
             # 如果頻道發送失敗（例如在 DM 中），改用 respond
             if "channel_not_found" in str(channel_error):
-                answer, _ = dify.chat_complete(
-                    query=query,
-                    user=user_id,
-                    stream=True,
-                )
+                try:
+                    answer, _ = dify.chat_complete(
+                        query=query,
+                        user=user_id,
+                        stream=True,
+                    )
+                except Exception as dify_error:
+                    print(f"   ⚠️ Dify error, retrying: {dify_error}")
+                    answer, _ = dify.chat_complete(
+                        query=query,
+                        user=user_id,
+                        stream=True,
+                    )
                 respond(f"*問題：* {query}\n\n{answer}")
             else:
                 raise channel_error
@@ -209,11 +226,20 @@ def handle_ask_private_command(ack, command, respond):
         return
 
     try:
-        answer, _ = dify.chat_complete(
-            query=query,
-            user=user_id,
-            stream=True,
-        )
+        # 發送到 Dify，失敗則重試一次
+        try:
+            answer, _ = dify.chat_complete(
+                query=query,
+                user=user_id,
+                stream=True,
+            )
+        except Exception as dify_error:
+            print(f"   ⚠️ Dify error, retrying: {dify_error}")
+            answer, _ = dify.chat_complete(
+                query=query,
+                user=user_id,
+                stream=True,
+            )
 
         respond(f"*問題：* {query}\n\n{answer}")
 
@@ -226,15 +252,16 @@ def handle_ask_private_command(ack, command, respond):
 # ============================================
 @app.command("/reset")
 def handle_reset_command(ack, command, respond):
-    """清除 DM 對話歷史"""
+    """清除對話歷史"""
     ack()
 
     user_id = command["user_id"]
     channel_id = command["channel_id"]
     dm_key = get_dm_key(user_id)
 
-    # 清除一般 DM 對話
     cleared_count = 0
+    
+    # 清除一般 DM 對話
     if dm_key in conversations:
         del conversations[dm_key]
         cleared_count += 1
@@ -245,8 +272,14 @@ def handle_reset_command(ack, command, respond):
         del conversations[key]
         cleared_count += 1
 
+    # 清除該 channel 下所有 thread 的對話
+    thread_keys = [k for k in conversations.keys() if k.startswith(f"thread:{channel_id}:")]
+    for key in thread_keys:
+        del conversations[key]
+        cleared_count += 1
+
     if cleared_count > 0:
-        respond(f"✅ 已清除 {cleared_count} 個對話歷史！\n💡 提示：在 Slack Assistant 模式下，開新 thread 即可開始全新對話。")
+        respond(f"✅ 已清除 {cleared_count} 個對話歷史！\n💡 提示：開新 thread 即可開始全新對話。")
     else:
         respond("目前沒有進行中的對話。")
 
@@ -293,9 +326,12 @@ def handle_mention(event, say, client):
         say(text="請告訴我你想問什麼 🤔", thread_ts=thread_ts)
         return
 
-    # 查找 thread 對話
+    # 查找 thread 對話（整個 thread 共用一個對話上下文）
     thread_key = get_thread_key(channel, thread_ts)
     conversation_id = conversations.get(thread_key)
+
+    # 使用 thread_key 作為 Dify user，讓整個 thread 共用對話
+    dify_user = thread_key
 
     try:
         # 顯示 responding 狀態
@@ -305,12 +341,25 @@ def handle_mention(event, say, client):
             text="_responding..._",
         )
 
-        answer, new_conversation_id = dify.chat_complete(
-            query=query,
-            user=user_id,
-            conversation_id=conversation_id,
-            stream=True,
-        )
+        # 嘗試呼叫 Dify，失敗則重試一次
+        try:
+            answer, new_conversation_id = dify.chat_complete(
+                query=query,
+                user=dify_user,
+                conversation_id=conversation_id,
+                stream=True,
+            )
+        except Exception as dify_error:
+            print(f"   ⚠️ Dify error, retrying: {dify_error}")
+            if "404" in str(dify_error) and conversation_id:
+                conversations.pop(thread_key, None)
+                conversation_id = None
+            answer, new_conversation_id = dify.chat_complete(
+                query=query,
+                user=dify_user,
+                conversation_id=conversation_id,
+                stream=True,
+            )
 
         if new_conversation_id:
             conversations[thread_key] = new_conversation_id
@@ -354,16 +403,18 @@ def handle_message(event, say, client, logger):
     # ---- DM 對話 ----
     if channel_type == "im":
         # Slack Assistant 模式會自動建立 thread
-        # 用 thread_ts 來追蹤每個 assistant thread 的對話
         thread_ts = event.get("thread_ts")
         
         if thread_ts:
-            # Assistant thread 模式：用 thread_ts 作為 key
+            # Assistant thread 模式：整個 thread 共用對話上下文
             conv_key = f"assistant:{channel}:{thread_ts}"
+            # 使用 conv_key 作為 Dify user，讓多人共用對話
+            dify_user = conv_key
             print(f"💬 Assistant thread from user {user_id}: {text[:50]}...")
         else:
             # 一般 DM 模式：用 user_id 作為 key
             conv_key = get_dm_key(user_id)
+            dify_user = user_id
             print(f"💬 DM received from user {user_id}: {text[:50]}...")
         
         conversation_id = conversations.get(conv_key)
@@ -378,12 +429,27 @@ def handle_message(event, say, client, logger):
             
             responding_msg = client.chat_postMessage(**msg_kwargs)
 
-            answer, new_conversation_id = dify.chat_complete(
-                query=text,
-                user=user_id,
-                conversation_id=conversation_id,
-                stream=True,
-            )
+            # 嘗試呼叫 Dify，失敗則重試一次
+            try:
+                answer, new_conversation_id = dify.chat_complete(
+                    query=text,
+                    user=dify_user,
+                    conversation_id=conversation_id,
+                    stream=True,
+                )
+            except Exception as dify_error:
+                print(f"   ⚠️ Dify error, retrying: {dify_error}")
+                # 如果有 conversation_id 且是 404，清除後重試
+                if "404" in str(dify_error) and conversation_id:
+                    conversations.pop(conv_key, None)
+                    conversation_id = None
+                # 重試一次
+                answer, new_conversation_id = dify.chat_complete(
+                    query=text,
+                    user=dify_user,
+                    conversation_id=conversation_id,
+                    stream=True,
+                )
 
             if new_conversation_id:
                 conversations[conv_key] = new_conversation_id
@@ -424,6 +490,9 @@ def handle_message(event, say, client, logger):
     if not query:
         return
 
+    # 使用 thread_key 作為 Dify user，讓整個 thread 共用對話
+    dify_user = thread_key
+
     try:
         # 顯示 responding 狀態
         responding_msg = client.chat_postMessage(
@@ -432,12 +501,25 @@ def handle_message(event, say, client, logger):
             text="_responding..._",
         )
 
-        answer, new_conversation_id = dify.chat_complete(
-            query=query,
-            user=user_id,
-            conversation_id=conversation_id,
-            stream=True,
-        )
+        # 嘗試呼叫 Dify，失敗則重試一次
+        try:
+            answer, new_conversation_id = dify.chat_complete(
+                query=query,
+                user=dify_user,
+                conversation_id=conversation_id,
+                stream=True,
+            )
+        except Exception as dify_error:
+            print(f"   ⚠️ Dify error, retrying: {dify_error}")
+            if "404" in str(dify_error) and conversation_id:
+                conversations.pop(thread_key, None)
+                conversation_id = None
+            answer, new_conversation_id = dify.chat_complete(
+                query=query,
+                user=dify_user,
+                conversation_id=conversation_id,
+                stream=True,
+            )
 
         if new_conversation_id:
             conversations[thread_key] = new_conversation_id
@@ -511,12 +593,20 @@ def handle_reaction(event, client, logger):
             text="_responding..._",
         )
 
-        # 發送到 Dify
-        answer, _ = dify.chat_complete(
-            query=prompt,
-            user=user_id,
-            stream=True,
-        )
+        # 發送到 Dify，失敗則重試一次
+        try:
+            answer, _ = dify.chat_complete(
+                query=prompt,
+                user=user_id,
+                stream=True,
+            )
+        except Exception as dify_error:
+            print(f"   ⚠️ Dify error, retrying: {dify_error}")
+            answer, _ = dify.chat_complete(
+                query=prompt,
+                user=user_id,
+                stream=True,
+            )
 
         # 更新回答
         client.chat_update(

@@ -221,3 +221,5 @@ slack-bot-101/
 - 所有回覆加上 `responding...` 狀態提示
 - 支援 Slack Assistant 模式（每個 thread 獨立追蹤對話上下文）
 - 新增 Docker 支援（Dockerfile + docker-compose.yml）
+- 修復多用戶共用 thread 時 Dify 404 錯誤（使用 thread key 作為 Dify user，讓多人共享對話上下文）
+- Dify API 呼叫失敗時自動重試一次
